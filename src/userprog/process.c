@@ -1,3 +1,4 @@
+#include "threads/malloc.h"
 #include "userprog/process.h"
 #include <debug.h>
 #include <inttypes.h>
@@ -65,6 +66,11 @@ start_process (void *file_name_)
   palloc_free_page (file_name);
   if (!success) 
     thread_exit ();
+
+  /* Print user stack to verify argument passing. */
+  hex_dump ((uintptr_t) if_.esp, if_.esp,
+          (uint8_t *) PHYS_BASE - (uint8_t *) if_.esp,
+          true);
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -195,7 +201,7 @@ struct Elf32_Phdr
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
 
-static bool setup_stack (void **esp);
+static bool setup_stack (void **esp, const char *file_name);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
@@ -221,13 +227,36 @@ load (const char *file_name, void (**eip) (void), void **esp)
     goto done;
   process_activate ();
 
-  /* Open executable file. */
-  file = filesys_open (file_name);
-  if (file == NULL) 
+  /* Open executable file using only the program name. */
+  char *name_copy = malloc (strlen (file_name) + 1);
+  if (name_copy == NULL)
+    goto done;
+
+  /* Keep the original command line unchanged. */
+  strlcpy (name_copy, file_name, strlen (file_name) + 1);
+
+  /* Extract the first token, which is the program name. */
+  char *save_ptr;
+  char *program_name = strtok_r (name_copy, " \t", &save_ptr);
+
+  if (program_name == NULL)
+    {
+      free (name_copy);
+      goto done;
+    }
+
+  /* Open the executable file. */
+  file = filesys_open (program_name);
+
+   /* Free the temporary copy. */
+  free (name_copy);
+
+  if (file == NULL)
     {
       printf ("load: %s: open failed\n", file_name);
-      goto done; 
+      goto done;
     }
+
 
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -302,7 +331,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (!setup_stack (esp, file_name))
     goto done;
 
   /* Start address. */
@@ -426,23 +455,116 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
+
 static bool
-setup_stack (void **esp) 
+setup_stack (void **esp, const char *file_name)
 {
   uint8_t *kpage;
+  uint8_t *sp, *stack_bottom;
+  char *copy = NULL;
+  char **args = NULL;
+  char *token, *save_ptr;
+  char **argv_start;
+  size_t len, bytes;
+  int argc = 0, i;
+  uint32_t zero = 0;
   bool success = false;
 
+  /* 1. Copy command line. */
+  len = strlen (file_name);
+  if (len == 0 || len >= PGSIZE)
+    return false;
+
+  copy = malloc (len + 1);
+  args = malloc ((len + 1) * sizeof *args);
+
+  if (copy == NULL || args == NULL)
+    goto done;
+
+  strlcpy (copy, file_name, len + 1);
+
+  /* 2. Parse arguments. */
+  for (token = strtok_r (copy, " \t", &save_ptr);
+       token != NULL;
+       token = strtok_r (NULL, " \t", &save_ptr))
+    args[argc++] = token;
+
+  if (argc == 0)
+    goto done;
+
+  /* 3. Create user stack. */
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
-  if (kpage != NULL) 
+  if (kpage == NULL)
+    goto done;
+
+  if (!install_page (((uint8_t *) PHYS_BASE) - PGSIZE,
+                     kpage, true))
     {
-      success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
-      if (success)
-        *esp = PHYS_BASE;
-      else
-        palloc_free_page (kpage);
+      palloc_free_page (kpage);
+      goto done;
     }
+
+  sp = (uint8_t *) PHYS_BASE;
+  stack_bottom = sp - PGSIZE;
+
+  /* 4. Push strings in reverse order. */
+  for (i = argc - 1; i >= 0; i--)
+    {
+      bytes = strlen (args[i]) + 1;
+      if ((size_t) (sp - stack_bottom) < bytes)
+        goto done;
+
+      sp -= bytes;
+      memcpy (sp, args[i], bytes);
+      args[i] = (char *) sp;
+    }
+
+  /* 5. Align stack to 4 bytes. */
+  while ((uintptr_t) sp % 4 != 0)
+    {
+      if (sp == stack_bottom)
+        goto done;
+      *--sp = 0;
+    }
+
+  /* Check remaining stack space. */
+  if ((size_t) (sp - stack_bottom) <
+      (size_t) (argc + 4) * sizeof (uint32_t))
+    goto done;
+
+  /* 6. Push NULL sentinel. */
+  sp -= sizeof zero;
+  memcpy (sp, &zero, sizeof zero);
+
+  /* 7. Push argument addresses. */
+  for (i = argc - 1; i >= 0; i--)
+    {
+      sp -= sizeof args[i];
+      memcpy (sp, &args[i], sizeof args[i]);
+    }
+
+  /* 8. Push argv pointer. */
+  argv_start = (char **) sp;
+  sp -= sizeof argv_start;
+  memcpy (sp, &argv_start, sizeof argv_start);
+
+  /* 9. Push argc. */
+  sp -= sizeof argc;
+  memcpy (sp, &argc, sizeof argc);
+
+  /* 10. Push fake return address. */
+  sp -= sizeof zero;
+  memcpy (sp, &zero, sizeof zero);
+
+  *esp = sp;
+  success = true;
+
+done:
+  free (args);
+  free (copy);
   return success;
 }
+
 
 /* Adds a mapping from user virtual address UPAGE to kernel
    virtual address KPAGE to the page table.
