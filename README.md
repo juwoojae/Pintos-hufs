@@ -1,1 +1,11 @@
-The Pintos project conducted in the Operating Systems course at the College of Computer Engineering, Hankuk University of Foreign Studies
+# Pintos 운영체제 실습
+
+한국외국어대학교 컴퓨터공학부 운영체제 수업에서 Pintos 커널을 수정하며 진행한 두 가지 실습입니다.
+
+## 실습 1 · Alarm Clock
+
+`timer_sleep()`에서 스레드가 CPU를 반복해서 양보하며 기다리던 코드를 수정했습니다. 이제 스레드는 깨어날 틱을 기록하고 대기 목록에서 잠듭니다. 타이머 인터럽트가 발생하면 깨어날 시각이 된 스레드를 준비 상태(`READY`)로 돌려보냅니다. [타이머 처리](src/devices/timer.c) · [스레드 대기와 깨우기](src/threads/thread.c)
+
+## 실습 2 · 사용자 프로그램 실행과 인자 전달
+
+`echo x`를 실행하면 `load()`가 명령줄에서 실행 파일 이름 `echo`를 분리해 열고, `setup_stack()`이 인자 문자열과 포인터를 사용자 스택에 배치하도록 구현했습니다. 사용자 모드 진입 직전의 스택 덤프에서 `argc`가 2이고 `argv[0]`과 `argv[1]`이 각각 `"echo"`와 `"x"`를 가리키는 것을 확인했습니다. [실행 파일 로딩과 스택 구성](src/userprog/process.c)
